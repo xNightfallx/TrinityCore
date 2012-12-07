@@ -545,6 +545,22 @@ void Unit::DealDamageMods(Unit* victim, uint32 &damage, uint32* absorb)
 
 uint32 Unit::DealDamage(Unit* victim, uint32 damage, CleanDamage const* cleanDamage, DamageEffectType damagetype, SpellSchoolMask damageSchoolMask, SpellInfo const* spellProto, bool durabilityLoss)
 {
+    Player* pDamager = GetCharmerOrOwnerPlayerOrPlayerItself();
+    Player* pDamaged = victim->GetCharmerOrOwnerPlayerOrPlayerItself();
+
+    if (pDamager && pDamaged && pDamager != pDamaged)
+    {
+        // Remove overkill damage.
+        int32 nooverkilldmg = 0;
+        if (damage > pDamaged->GetHealth())
+            nooverkilldmg = pDamaged->GetHealth();
+        else
+            nooverkilldmg = damage;
+
+        if (nooverkilldmg > 0)
+            pDamaged->Damaged(pDamager->GetGUIDLow(), nooverkilldmg);
+    }
+
     if (victim->IsAIEnabled)
         victim->GetAI()->DamageTaken(this, damage);
 
@@ -702,6 +718,9 @@ uint32 Unit::DealDamage(Unit* victim, uint32 damage, CleanDamage const* cleanDam
     if (health <= damage)
     {
         sLog->outDebug(LOG_FILTER_UNITS, "DealDamage: victim just died");
+
+        if (((Player*)victim))
+            ((Player*)victim)->HandlePvPKill();
 
         if (victim->GetTypeId() == TYPEID_PLAYER && victim != this)
             victim->ToPlayer()->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_TOTAL_DAMAGE_RECEIVED, health);
@@ -10092,6 +10111,12 @@ int32 Unit::DealHeal(Unit* victim, uint32 addhealth)
         player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_TOTAL_HEALING_RECEIVED, gain);
         player->UpdateAchievementCriteria(ACHIEVEMENT_CRITERIA_TYPE_HIGHEST_HEALING_RECEIVED, addhealth);
     }
+
+    Player* pHealer = GetCharmerOrOwnerPlayerOrPlayerItself();
+    Player* pHealed = victim->GetCharmerOrOwnerPlayerOrPlayerItself();
+
+    if (pHealer && pHealed && pHealer != pHealed && gain > 0)
+        pHealed->Healed(pHealer->GetGUIDLow(), gain);
 
     return gain;
 }

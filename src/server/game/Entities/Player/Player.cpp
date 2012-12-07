@@ -79,6 +79,8 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
+#include <numeric>
+
 #define ZONE_UPDATE_INTERVAL (1*IN_MILLISECONDS)
 
 #define PLAYER_SKILL_INDEX(x)       (PLAYER_SKILL_INFO_1_1 + ((x)*3))
@@ -25843,4 +25845,134 @@ Pet* Player::SummonPet(uint32 entry, float x, float y, float z, float ang, PetTy
     //ObjectAccessor::UpdateObjectVisibility(pet);
 
     return pet;
+}
+
+uint32 pair_adder(uint32 n, const std::map<uint64, uint32>::value_type & p) { return n + p.second; }
+
+void Player::HandlePvPKill()
+{
+
+    const int32 RewardGold = 10000;
+    uint32 InCombatPlayers = 0;
+    uint64 MaxDmgGUID = 0;
+    uint64 MaxDmgDmg  = 0;
+
+    // Damage Code Begin
+    float TotalHealth = std::accumulate(m_Damagers.begin(), m_Damagers.end(),0,pair_adder); // Summary of all damage done to victim
+    for (std::map<uint64, uint32>::const_iterator itr = m_Damagers.begin(); itr != m_Damagers.end(); ++itr)
+    {
+        uint64  GUID    = itr->first;
+        float   Damage  = itr->second;
+
+        Player* pAttacker = sObjectMgr->GetPlayerByLowGUID(GUID);
+        if (!pAttacker)
+            continue;
+
+        if (Damage > MaxDmgDmg)
+        {
+            MaxDmgGUID  = GUID;
+            MaxDmgDmg   = Damage;
+        }
+
+        ++InCombatPlayers;
+
+        if (pAttacker->HandlePvPAntifarm(this))
+        {
+            int32 Reward = (RewardGold * (Damage / TotalHealth)*((pAttacker->GetKillStreak()/10)+1.0f));
+            if (Reward > RewardGold*3)
+                Reward = RewardGold*3;
+            pAttacker->ModifyMoney(+Reward);
+            pAttacker->IncreaseKillStreak();
+
+            pAttacker->SendChatMessage("%s[PvP System]%s You got awarded %g gold for damaging %s",MSG_COLOR_MAGENTA,MSG_COLOR_WHITE,Reward/10000.f,GetNameLink().c_str());
+
+            // Damage Code End | Healing Code Begin
+            float TotalHealing = std::accumulate(pAttacker->m_Healers.begin(), pAttacker->m_Healers.end(),0,pair_adder); // Summary of all healing done to attacker
+            for (std::map<uint64, uint32>::const_iterator itr = pAttacker->m_Healers.begin(); itr != pAttacker->m_Healers.end(); ++itr)
+            {
+
+                uint64  GUID        = itr->first;
+                float   Healing     = itr->second;
+                float   MaxHealth   = pAttacker->GetMaxHealth();
+
+                Player* pHealer = sObjectMgr->GetPlayerByLowGUID(GUID);
+                if (!pHealer)
+                    continue;
+
+                ++InCombatPlayers;
+
+                float maxhealingPct = (Healing/MaxHealth);
+                if (maxhealingPct > 1) maxhealingPct = 1.0f;
+
+                Reward = (Reward * ((Healing / TotalHealing)*((pHealer->GetKillStreak()/10)+1.0f)*maxhealingPct));
+                if (Reward > RewardGold*3)
+                    Reward = RewardGold*3;
+                pHealer->ModifyMoney(+Reward);
+                pHealer->IncreaseKillStreak();
+
+                pHealer->SendChatMessage("%s[PvP System]%s You got awarded %g gold for healing %s",MSG_COLOR_MAGENTA,MSG_COLOR_WHITE,Reward/10000.f,pAttacker->GetNameLink().c_str());
+            }
+            // Healing Code End
+        }
+        else
+        {
+            pAttacker->SendChatMessage("%s[Antifarming System]%s You triggered out antifarming system. This action was logged.",MSG_COLOR_MAGENTA,MSG_COLOR_WHITE);
+        }
+    }
+
+    if (Player* pMostDamager = sObjectMgr->GetPlayerByLowGUID(MaxDmgGUID))
+    {
+        pMostDamager->SendChatMessage("%s[PvP System]%s You did most damage to %s%s (%u)",MSG_COLOR_MAGENTA,MSG_COLOR_WHITE,GetNameLink().c_str(),MSG_COLOR_WHITE,MaxDmgDmg);
+        SendChatMessage("%s[PvP System]%s Your main attacker was %s%s who did %u damage to you.",MSG_COLOR_MAGENTA,MSG_COLOR_WHITE,pMostDamager->GetNameLink().c_str(),MSG_COLOR_WHITE,MaxDmgDmg);
+    }
+
+    ClearKillStreak();
+    ClearDamageHeal();
+
+    if (InCombatPlayers > 1)
+        SendChatMessage("%s[PvP System]%s There were %u players involved in the combat to your death.",MSG_COLOR_MAGENTA,MSG_COLOR_WHITE,InCombatPlayers);
+}
+
+bool Player::HandlePvPAntifarm(Player* victim)
+{
+    const float m_Maxpercent = 0.25f;
+    const uint32 m_Vectorsize = 20;
+    const uint32 m_Minentries = 4;
+
+    if (this == victim) // Attacker is victim (Suicide)
+        return false;
+    else if ((HasAura(2479) || victim->HasAura(2479))) // Attacker or victim has honor less aura
+        return false;
+
+    uint32 m_IPCount_1 = 0;
+    for(uint32 i = 0; i < m_Killers.size(); i++)
+    {
+        std::string m_KillerIP = m_Killers.at(i);
+        if (GetSession()->GetRemoteAddress() == m_KillerIP)
+            ++m_IPCount_1;
+    }
+
+    m_Killers.insert(m_Killers.begin(),GetSession()->GetRemoteAddress());
+    while(m_Killers.size() > m_Vectorsize)
+        m_Killers.pop_back();
+
+    if ((float(m_IPCount_1)/m_Killers.size()) >= m_Maxpercent && m_Killers.size() >= m_Minentries)
+        return false;
+
+    uint32 m_IPCount_2 = 0;
+    for(uint32 i = 0; i < m_Victims.size(); i++)
+    {
+        std::string m_VictimIP = m_Victims.at(i);
+        if (victim->GetSession()->GetRemoteAddress() == m_VictimIP)
+            ++m_IPCount_2;
+    }
+
+    m_Victims.insert(m_Victims.begin(),victim->GetSession()->GetRemoteAddress());
+    while(m_Victims.size() > m_Vectorsize)
+        m_Victims.pop_back();
+
+    if ((float(m_IPCount_2)/m_Victims.size()) >= m_Maxpercent && m_Victims.size() >= m_Minentries)
+        return false;
+
+    return true;
 }
